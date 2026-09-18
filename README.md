@@ -1,343 +1,180 @@
-# PS5 Keyboard Proxy — Raspberry Pi + RP2040
+# PS5 Keyboard Proxy
 
-Fork and adaptation of [Nothka/ps5-keyboard-proxy](https://github.com/Nothka/ps5-keyboard-proxy).
+A Raspberry Pi Zero 2 W + RP2040 based keyboard proxy that allows a Logitech G915 TKL keyboard to be used as a USB HID keyboard on a PlayStation 5.
 
-This version adapts the original project to use a **Raspberry Pi Zero 2 W** as a bridge between a **Logitech G915 TKL** keyboard and an **RP2040**, which then presents itself to the PS5 as a USB HID keyboard.
+This project is based on the original [`Nothka/ps5-keyboard-proxy`](https://github.com/Nothka/ps5-keyboard-proxy) project and is maintained in this fork:
+
+https://github.com/gvilar/ps5-keyboard-proxy
 
 ## Architecture
 
 ```text
 Logitech G915 TKL
         │
-        │ USB
+        │ evdev
         ▼
 Raspberry Pi Zero 2 W
         │
-        │ evdev
-        ▼
-kb_passthrough.py
-        │
-        │ UART /dev/serial0
-        │ 115200 baud
+        │ kb_passthrough.py
+        │ UART /dev/serial0 @ 115200
         ▼
 RP2040
         │
         │ USB HID Keyboard
         ▼
-       PS5
+PlayStation 5
 ```
 
-### Raspberry Pi role
+The Raspberry Pi handles the Logitech keyboard through Linux `evdev`.
 
-The Raspberry Pi receives keyboard events from Linux through `evdev`.
+The RP2040 receives HID keyboard reports over UART and presents itself to the PS5 as a standard USB HID keyboard.
 
-The `kb_passthrough.py` script:
-
-* detects the Logitech G915 TKL;
-* reads keyboard events;
-* converts Linux key codes to HID key codes;
-* handles modifiers (`Ctrl`, `Shift`, `Alt`, `Meta`);
-* builds 8-byte keyboard HID reports;
-* sends these reports to the RP2040 through `/dev/serial0` at **115200 baud**.
-
-The Raspberry Pi **does not directly present itself as a USB HID keyboard to the PS5**.
-
-### RP2040 role
-
-The RP2040 receives the 8-byte reports through UART and forwards them to the PS5 using **TinyUSB** as a USB HID Keyboard device.
-
-The firmware is located in:
-
-```text
-rp2040/
-├── CMakeLists.txt
-├── main.c
-├── tusb_config.h
-└── usb_descriptors.c
-```
-
-## Differences from the original project
-
-The original project uses a Linux HID Gadget device:
-
-```text
-/dev/hidg0
-```
-
-This adaptation replaces that output with a serial connection:
-
-```text
-Raspberry Pi
-    │
-    │ UART
-    ▼
-RP2040
-    │
-    │ USB HID
-    ▼
-PS5
-```
-
-The original keyboard passthrough logic, including the `keymap`, `modmap`, keyboard detection, pressed-key handling and modifier handling, has been kept and adapted to use the RP2040 UART output.
+The Pi does **not** emulate `/dev/hidg0`; the USB HID device connected to the PS5 is the RP2040.
 
 ## Hardware
 
-### Raspberry Pi
-
 * Raspberry Pi Zero 2 W
-* Raspberry Pi OS / Linux
-* Python 3
-* `python3-evdev`
-* `pyserial`
-
-### Keyboard
-
+* RP2040 board
 * Logitech G915 TKL
+* PlayStation 5
+* USB cable between the RP2040 and the PS5
+* UART connection between the Raspberry Pi and RP2040
 
-### RP2040
+### UART wiring
 
-* RP2040 compatible with TinyUSB
-* Tested with a **Waveshare RP2040 Zero**
-* UART connection at 115200 baud
+The current firmware uses UART0:
 
-### UART connection
+| Raspberry Pi | RP2040        |
+| ------------ | ------------- |
+| TX           | GP1 / UART RX |
+| RX           | GP0 / UART TX |
+| GND          | GND           |
 
-The tested wiring is:
+Use the appropriate UART pins for the specific RP2040 board.
+
+The configured UART speed is:
 
 ```text
-Raspberry Pi TX  ──────► RP2040 RX / GPIO1
-Raspberry Pi GND ─────► RP2040 GND
-```
-
-The RP2040 firmware uses:
-
-```text
-UART0
 115200 baud
-TX GPIO0
-RX GPIO1
 ```
 
-The Raspberry Pi uses:
+## UART Protocol
+
+The Pi sends one USB HID keyboard report preceded by a two-byte synchronization sequence.
+
+Each packet is:
 
 ```text
-/dev/serial0
-```
-
-## UART Report Format
-
-Each report sent by the Raspberry Pi contains exactly **8 bytes**, following the USB HID Boot Keyboard report format:
-
-```text
-Byte 0 : modifiers
-Byte 1 : reserved
-Byte 2 : key 1
-Byte 3 : key 2
-Byte 4 : key 3
-Byte 5 : key 4
-Byte 6 : key 5
-Byte 7 : key 6
+AA 55 + 8-byte HID keyboard report
 ```
 
 Example:
 
 ```text
+AA 55 02 00 04 00 00 00 00 00
+```
+
+The HID report is the standard 8-byte boot keyboard report:
+
+```text
+Byte 0: Modifier
+Byte 1: Reserved
+Byte 2: Key 1
+Byte 3: Key 2
+Byte 4: Key 3
+Byte 5: Key 4
+Byte 6: Key 5
+Byte 7: Key 6
+```
+
+### Modifier byte
+
+```text
+Bit 0: Left Ctrl
+Bit 1: Left Shift
+Bit 2: Left Alt
+Bit 3: Left GUI
+Bit 4: Right Ctrl
+Bit 5: Right Shift
+Bit 6: Right Alt
+Bit 7: Right GUI
+```
+
+For example:
+
+```text
 02 00 04 00 00 00 00 00
 ```
 
-This represents:
+means:
 
 ```text
 Left Shift + A
 ```
 
-A null report:
+### Why `AA 55` is used
+
+UART is a byte stream and does not preserve packet boundaries.
+
+The original implementation assumed that every group of eight received bytes was exactly one HID report. If an extra byte or a lost byte caused the stream to become offset, all following reports could be misaligned.
+
+The RP2040 firmware now searches for:
 
 ```text
-00 00 00 00 00 00 00 00
+AA 55
 ```
 
-is used to report that keys have been released.
+before reading the following eight bytes as a HID report.
+
+This allows the receiver to resynchronize with the stream.
+
+## Raspberry Pi Software
+
+The Pi runs:
+
+```text
+kb_passthrough.py
+```
+
+The script:
+
+1. Finds the Logitech G915 TKL through `evdev`.
+2. Grabs the keyboard exclusively.
+3. Converts Linux key codes to USB HID usage codes.
+4. Maintains the current modifier state.
+5. Builds an 8-byte HID keyboard report.
+6. Adds the `AA 55` synchronization header.
+7. Sends the packet through `/dev/serial0`.
+
+Example packet:
+
+```text
+AA 55 02 00 04 00 00 00 00 00
+```
 
 ## Installation
 
-Clone the repository:
-
-```bash
-git clone <URL_OF_YOUR_FORK>
-cd ps5-keyboard-proxy
-```
-
-Install the Python dependencies:
+Install the required Python packages:
 
 ```bash
 sudo apt update
 sudo apt install python3-evdev python3-serial
 ```
 
-Check the input devices:
+Clone the repository:
 
 ```bash
-ls -l /dev/input/
+git clone git@github.com:gvilar/ps5-keyboard-proxy.git
+cd ps5-keyboard-proxy
 ```
 
-The script automatically searches for a keyboard whose name contains:
-
-```text
-G915
-```
-
-and:
-
-```text
-Keyboard
-```
-
-## Manual execution
-
-Run:
+Make sure the Logitech keyboard is connected and visible:
 
 ```bash
-sudo python3 kb_passthrough.py
+ls /dev/input/event*
 ```
 
-You should see output similar to:
-
-```text
-Using keyboard: ...
-Keyboard grabbed
-Using UART: /dev/serial0 @ 115200
-```
-
-UART reports are printed to the console in hexadecimal format.
-
-## systemd service
-
-The repository contains systemd service files in:
-
-```text
-services/
-```
-
-The keyboard passthrough service is:
-
-```text
-services/kbpassthrough.service
-```
-
-Install it with:
-
-```bash
-sudo cp services/kbpassthrough.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable kbpassthrough.service
-sudo systemctl start kbpassthrough.service
-```
-
-Check its status:
-
-```bash
-systemctl status kbpassthrough.service
-```
-
-Follow the logs:
-
-```bash
-journalctl -u kbpassthrough.service -f
-```
-
-## RP2040 Firmware
-
-The RP2040 firmware is located in:
-
-```text
-rp2040/
-```
-
-The firmware uses the **Raspberry Pi Pico SDK** and **TinyUSB**.
-
-Set the Pico SDK path:
-
-```bash
-export PICO_SDK_PATH=/home/viciado/pico-sdk
-```
-
-Build the firmware:
-
-```bash
-cd rp2040
-mkdir -p build
-cd build
-cmake ..
-make -j2
-```
-
-The generated firmware, including the `.uf2` file, is placed in:
-
-```text
-rp2040/build/
-```
-
-The `build/` directory contains generated files and should not be committed to Git.
-
-## UART Test
-
-A HID report can be sent directly from the Raspberry Pi to test the complete UART → RP2040 → USB HID path:
-
-```bash
-python3 - <<'PY'
-import serial
-import time
-
-s = serial.Serial('/dev/serial0', 115200, timeout=1)
-
-# Right Arrow
-s.write(bytes([0, 0, 0x4F, 0, 0, 0, 0, 0]))
-s.flush()
-
-time.sleep(0.2)
-
-# Release
-s.write(bytes(8))
-s.flush()
-
-s.close()
-
-print("Right arrow sent")
-PY
-```
-
-This allows the following path to be tested independently:
-
-```text
-Raspberry Pi
-    ↓ UART
-RP2040
-    ↓ USB HID
-PS5
-```
-
-## Troubleshooting
-
-### Check the serial device
-
-```bash
-ls -l /dev/serial0
-```
-
-### Check the keyboard service
-
-```bash
-systemctl status kbpassthrough.service
-```
-
-### View service logs
-
-```bash
-journalctl -u kbpassthrough.service -f
-```
-
-### Check input devices
+You can inspect available input devices with:
 
 ```bash
 python3 - <<'PY'
@@ -349,68 +186,390 @@ for path in list_devices():
 PY
 ```
 
-### Run the passthrough manually
+## Manual Execution
+
+Run:
 
 ```bash
-python3 kb_passthrough.py
+sudo python3 kb_passthrough.py
 ```
 
-UART HID reports should appear in the console.
+The script should report something similar to:
 
-## Limitations
+```text
+Using keyboard: Logitech G915 TKL ... at /dev/input/event2
+Keyboard grabbed
+Using UART: /dev/serial0 @ 115200
+```
 
-This implementation primarily uses the standard **USB HID Boot Keyboard** format.
+When a key is pressed, the script prints the packet sent to the RP2040:
 
-Therefore, Logitech-specific features may not be supported depending on the events exposed by Linux and the current key mapping, including:
+```text
+UART: aa 55 02 00 04 00 00 00 00 00
+```
 
-* Logitech macros;
-* proprietary Logitech functions;
-* multimedia keys not present in the current `keymap`;
-* RGB lighting;
-* Logitech G HUB-specific features.
+## systemd Service
 
-Support also depends on the input events exposed by `evdev`.
+The project can run automatically at boot using:
 
-## Repository Structure
+```text
+/etc/systemd/system/ps5-keyboard-proxy.service
+```
+
+Example:
+
+```ini
+[Unit]
+Description=PS5 Keyboard Proxy - G915 to RP2040 UART
+After=network.target
+Wants=dev-serial0.device
+After=dev-serial0.device
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/viciado/ps5-keyboard-proxy
+ExecStart=/usr/bin/python3 /home/viciado/ps5-keyboard-proxy/kb_passthrough.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now ps5-keyboard-proxy.service
+```
+
+Check status:
+
+```bash
+systemctl status ps5-keyboard-proxy.service
+```
+
+View logs:
+
+```bash
+journalctl -u ps5-keyboard-proxy.service -f
+```
+
+## RP2040 Firmware
+
+The RP2040 firmware is located in:
+
+```text
+rp2040/
+```
+
+The firmware uses:
+
+* Raspberry Pi Pico SDK
+* TinyUSB
+* UART0
+* USB HID Boot Keyboard
+
+The current board configuration is:
+
+```cmake
+set(PICO_BOARD waveshare_rp2040_zero)
+```
+
+Set the Pico SDK path:
+
+```bash
+export PICO_SDK_PATH=/home/viciado/pico-sdk
+```
+
+Build:
+
+```bash
+cd rp2040/build
+make -j2
+```
+
+The resulting UF2 file is:
+
+```text
+rp2040_uart_test.uf2
+```
+
+## Flashing the RP2040
+
+Put the RP2040 into BOOTSEL mode and load:
+
+```bash
+picotool load rp2040_uart_test.uf2
+```
+
+Then reboot:
+
+```bash
+picotool reboot
+```
+
+The running USB device should appear as:
+
+```text
+2e8a:000a
+```
+
+Check with:
+
+```bash
+lsusb -d 2e8a:000a
+```
+
+## Testing the USB HID Interface
+
+The RP2040 is exposed by Linux as a HID keyboard.
+
+Find the corresponding input device:
+
+```bash
+for d in /sys/class/input/event*; do
+    printf '%s: ' "$d"
+    cat "$d/device/name" 2>/dev/null
+done
+```
+
+The RP2040 should appear similar to:
+
+```text
+HID 2e8a:000a
+```
+
+The raw HID interface can also be found with:
+
+```bash
+for d in /sys/class/hidraw/hidraw*; do
+    echo "===== $d ====="
+    readlink -f "$d/device"
+done
+```
+
+Look for:
+
+```text
+0003:2E8A:000A
+```
+
+## Testing the UART Protocol
+
+A direct test can send a Shift+A HID report:
+
+```bash
+python3 - <<'PY'
+import serial
+import time
+
+s = serial.Serial('/dev/serial0', 115200, timeout=1)
+
+packet = bytes([
+    0xAA, 0x55,
+    0x02, 0x00, 0x04, 0x00,
+    0x00, 0x00, 0x00, 0x00
+])
+
+print("TX:", packet.hex(' '))
+
+s.write(packet)
+s.flush()
+
+time.sleep(1)
+s.close()
+PY
+```
+
+The RP2040 should expose the following HID report:
+
+```text
+02 00 04 00 00 00 00 00
+```
+
+This corresponds to:
+
+```text
+Left Shift + A
+```
+
+The same mechanism is used for Ctrl, Shift, Alt, GUI and normal keyboard keys.
+
+## Troubleshooting
+
+### Keyboard not detected
+
+Check input devices:
+
+```bash
+python3 - <<'PY'
+from evdev import InputDevice, list_devices
+
+for path in list_devices():
+    dev = InputDevice(path)
+    print(path, dev.name)
+PY
+```
+
+Make sure the G915 is present.
+
+### Keyboard is detected but the script cannot grab it
+
+Check which processes have the input device open:
+
+```bash
+fuser -v /dev/input/eventX
+```
+
+The Python process should have the device grabbed exclusively.
+
+### UART unavailable
+
+Check:
+
+```bash
+ls -l /dev/serial0
+```
+
+The expected UART is:
+
+```text
+/dev/serial0 -> /dev/ttyAMA0
+```
+
+Check the service logs:
+
+```bash
+journalctl -u ps5-keyboard-proxy.service -n 50 --no-pager
+```
+
+### RP2040 not detected by USB
+
+Check:
+
+```bash
+lsusb -d 2e8a:000a
+```
+
+If the board is in BOOTSEL mode instead, it normally appears as:
+
+```text
+2e8a:0003
+```
+
+### HID reports appear corrupted
+
+Verify that both sides use the current protocol:
+
+```text
+AA 55 + 8-byte HID report
+```
+
+The RP2040 firmware must be using the `AA 55` synchronization parser, and the Pi must send:
+
+```python
+uart.write(b"\xAA\x55" + report)
+```
+
+Do not send raw 8-byte reports to the current firmware.
+
+### Check the raw HID report
+
+Find the RP2040 `hidraw` device:
+
+```bash
+for d in /sys/class/hidraw/hidraw*; do
+    echo "===== $d ====="
+    readlink -f "$d/device"
+done
+```
+
+Then read eight bytes:
+
+```bash
+python3 - <<'PY'
+import os
+
+fd = os.open('/dev/hidrawX', os.O_RDONLY)
+
+data = os.read(fd, 8)
+print(data.hex(' '))
+
+os.close(fd)
+PY
+```
+
+Replace `hidrawX` with the RP2040 device.
+
+A Shift+A report should be:
+
+```text
+02 00 04 00 00 00 00 00
+```
+
+## Current Status
+
+The current implementation has been tested successfully with:
+
+* Logitech G915 TKL
+* Raspberry Pi Zero 2 W
+* RP2040
+* UART at 115200 baud
+* USB HID keyboard emulation
+* PlayStation 5
+
+Verified functionality includes:
+
+* Normal keyboard keys
+* Left Ctrl
+* Left Shift
+* Modifier combinations
+* USB HID enumeration
+* Automatic startup through systemd
+* UART synchronization using `AA 55`
+
+The PS5 sees the RP2040 as the USB keyboard device.
+
+## Project Structure
 
 ```text
 ps5-keyboard-proxy/
-├── README.md
-├── LICENSE
-├── .gitignore
-│
 ├── kb_passthrough.py
-├── install.sh
-├── ps5kbd.sh
-├── ps5kbd-gadget.sh
-│
-├── docs/
-│   ├── setup.md
-│   └── troubleshooting.md
-│
-├── services/
-│   ├── btautoconnect.service
-│   ├── kbpassthrough.service
-│   └── ps5kbd.service
-│
-└── rp2040/
-    ├── CMakeLists.txt
-    ├── main.c
-    ├── tusb_config.h
-    └── usb_descriptors.c
+├── README.md
+├── rp2040/
+│   ├── CMakeLists.txt
+│   ├── main.c
+│   ├── tusb_config.h
+│   ├── usb_descriptors.c
+│   └── build/
+└── ...
 ```
 
-Generated build files such as `build/`, `.uf2`, `.elf`, and other compilation artifacts are not required in the source repository.
+## Limitations
 
-## Attribution
+This is a relatively simple HID keyboard proxy.
 
-This project is a fork/adaptation of:
+The current implementation focuses on standard keyboard input and does not attempt to reproduce Logitech-specific functionality such as:
 
-**Nothka/ps5-keyboard-proxy**
+* G HUB profiles
+* RGB lighting control
+* Logitech macro processing
+* Media-specific Logitech features
+* Keyboard display features
+
+The Pi converts Linux keyboard events to standard USB HID keyboard usage codes.
+
+## Credits
 
 Original project:
 
-https://github.com/Nothka/ps5-keyboard-proxy
+[`Nothka/ps5-keyboard-proxy`](https://github.com/Nothka/ps5-keyboard-proxy)
 
-The original keyboard passthrough logic has been adapted to replace the `/dev/hidg0` output with UART communication to an RP2040.
+This repository is a fork with modifications for the Raspberry Pi Zero 2 W + RP2040 architecture and the current UART/HID implementation.
+
+## License
+
+See the repository's license file for the applicable license and attribution requirements.
 

@@ -120,7 +120,7 @@ def send_report():
     for i, key in enumerate(pressed[:6]):
         report[2 + i] = key
 
-    uart.write(report)
+    uart.write(b"\xAA\x55" + report) 
     uart.flush()
     print(f"UART: {report.hex(' ')}", flush=True)
 
