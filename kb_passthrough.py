@@ -2,7 +2,8 @@ import time
 from evdev import InputDevice, ecodes, list_devices
 
 KEYBOARD_NAME_HINTS = ["G915", "Keyboard"]
-HID_PATH = "/dev/hidg0"
+UART_PATH = "/dev/serial0"
+BAUD_RATE = 115200
 
 keymap = {
     ecodes.KEY_A: 0x04, ecodes.KEY_B: 0x05, ecodes.KEY_C: 0x06,
@@ -80,14 +81,23 @@ def wait_for_keyboard():
         print("Keyboard not found, waiting...", flush=True)
         time.sleep(1)
 
-def wait_for_hid():
+
+def wait_for_uart():
     while True:
         try:
-            hid = open(HID_PATH, "wb")
-            print(f"Using HID gadget: {HID_PATH}", flush=True)
-            return hid
-        except FileNotFoundError:
-            print("/dev/hidg0 not found, waiting...", flush=True)
+            import serial
+
+            uart = serial.Serial(
+                UART_PATH,
+                BAUD_RATE,
+                timeout=1
+            )
+
+            print(f"Using UART: {UART_PATH} @ {BAUD_RATE}", flush=True)
+            return uart
+
+        except Exception as e:
+            print(f"UART not available: {e}", flush=True)
             time.sleep(1)
 
 kbd = wait_for_keyboard()
@@ -98,7 +108,7 @@ try:
 except Exception as e:
     print(f"Could not grab keyboard: {e}", flush=True)
 
-hid = wait_for_hid()
+uart = wait_for_uart()
 
 pressed = []
 mods = 0
@@ -110,8 +120,9 @@ def send_report():
     for i, key in enumerate(pressed[:6]):
         report[2 + i] = key
 
-    hid.write(report)
-    hid.flush()
+    uart.write(report)
+    uart.flush()
+    print(f"UART: {report.hex(' ')}", flush=True)
 
 for event in kbd.read_loop():
     if event.type != ecodes.EV_KEY:
